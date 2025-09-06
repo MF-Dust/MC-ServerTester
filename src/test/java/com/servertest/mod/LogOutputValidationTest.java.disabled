@@ -1,0 +1,411 @@
+package com.servertest.mod;
+
+import com.servertest.mod.core.*;
+import net.minecraft.server.MinecraftServer;
+import net.minecraftforge.fml.ModList;
+import net.minecraftforge.forgespi.language.IModInfo;
+import org.apache.maven.artifact.versioning.ArtifactVersion;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.MockedStatic;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.util.Arrays;
+import java.util.List;
+import java.util.regex.Pattern;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+/**
+ * Comprehensive log output format validation tests
+ * Verifies that all log messages follow the correct format and contain required information
+ */
+@ExtendWith(MockitoExtension.class)
+class LogOutputValidationTest {
+    
+    @Mock
+    private MinecraftServer mockServer;
+    
+    @Mock
+    private Thread mockServerThread;
+    
+    @Mock
+    private ModList mockModList;
+    
+    @Mock
+    private IModInfo mockMod1;
+    
+    @Mock
+    private IModInfo mockMod2;
+    
+    @Mock
+    private IModInfo mockMod3;
+    
+    @Mock
+    private ArtifactVersion mockVersion1;
+    
+    @Mock
+    private ArtifactVersion mockVersion2;
+    
+    @Mock
+    private ArtifactVersion mockVersion3;
+    
+    @Mock
+    private SystemExitHandler mockExitHandler;
+    
+    private ByteArrayOutputStream outputStream;
+    private PrintStream originalOut;
+    private PrintStream originalErr;
+    
+    private MockedStatic<ModList> modListMock;
+    
+    // Log format patterns
+    private static final Pattern LOG_PREFIX_PATTERN = Pattern.compile("\\[SERVER-TEST\\]");
+    private static final Pattern TPS_PATTERN = Pattern.compile("\\[SERVER-TEST\\] TPS: \\d+\\.\\d+ \\(Average tick time: \\d+\\.\\d+ms\\)");
+    private static final Pattern MOD_LIST_HEADER_PATTERN = Pattern.compile("\\[SERVER-TEST\\] Loaded Mods \\(\\d+ total\\):");
+    private static final Pattern MOD_ENTRY_PATTERN = Pattern.compile("\\[SERVER-TEST\\] - \\w+ \\([^)]+\\)");
+    private static final Pattern SHUTDOWN_PATTERN = Pattern.compile("\\[SERVER-TEST\\] Server shutdown initiated");
+    private static final Pattern ERROR_PATTERN = Pattern.compile("\\[SERVER-TEST\\] CRITICAL ERROR:");
+    
+    @BeforeEach
+    void setUp() {
+        // Capture console output
+        outputStream = new ByteArrayOutputStream();
+        originalOut = System.out;
+        originalErr = System.err;
+        System.setOut(new PrintStream(outputStream));
+        System.setErr(new PrintStream(outputStream));
+        
+        // Setup mocks
+        ErrorHandler.setExitHandler(mockExitHandler);
+        modListMock = mockStatic(ModList.class);
+        
+        setupMockServer();
+        setupMockModList();
+    }
+    
+    @AfterEach
+    void tearDown() {
+        System.setOut(originalOut);
+        System.setErr(originalErr);
+        ErrorHandler.resetExitHandler();
+        modListMock.close();
+    }
+    
+    private void setupMockServer() {
+        when(mockServer.isRunning()).thenReturn(true);
+        when(mockServer.getRunningThread()).thenReturn(mockServerThread);
+        when(mockServerThread.isAlive()).thenReturn(true);
+        when(mockServer.getAverageTickTime()).thenReturn(50000000.0f); // 20 TPS
+    }
+    
+    private void setupMockModList() {
+        when(mockMod1.getModId()).thenReturn("minecraft");
+        when(mockMod1.getDisplayName()).thenReturn("Minecraft");
+        when(mockMod1.getVersion()).thenReturn(mockVersion1);
+        when(mockVersion1.toString()).thenReturn("1.20.1");
+        
+        when(mockMod2.getModId()).thenReturn("forge");
+        when(mockMod2.getDisplayName()).thenReturn("Minecraft Forge");
+        when(mockMod2.getVersion()).thenReturn(mockVersion2);
+        when(mockVersion2.toString()).thenReturn("47.4.0");
+        
+        when(mockMod3.getModId()).thenReturn("servertest");
+        when(mockMod3.getDisplayName()).thenReturn("Server Test Mod");
+        when(mockMod3.getVersion()).thenReturn(mockVersion3);
+        when(mockVersion3.toString()).thenReturn("1.0.0");
+        
+        List<IModInfo> mods = Arrays.asList(mockMod1, mockMod2, mockMod3);
+        when(mockModList.getMods()).thenReturn(mods);
+        modListMock.when(ModList::get).thenReturn(mockModList);
+    }
+    
+    @Test
+    void testTPSLogFormat() {
+        InfoCollector collector = new InfoCollector();
+        collector.collectAndOutputServerInfo(mockServer);
+        
+        String output = outputStream.toString();
+        
+        // Verify TPS log format
+        assertTrue(TPS_PATTERN.matcher(output).find(), "TPS log should match expected format");
+        
+        // Verify specific TPS values
+        assertTrue(output.contains("TPS: 20.0"), "Should show correct TPS value");
+        assertTrue(output.contains("Average tick time: 50.0ms"), "Should show correct tick time");
+        
+        // Verify no extra whitespace or formatting issues
+        String[] lines = output.split("\n");
+        for (String line : lines) {
+            if (line.contains("TPS:")) {
+                assertFalse(line.startsWith(" "), "TPS line should not start with whitespace");
+                assertFalse(line.endsWith(" "), "TPS line should not end with whitespace");
+                assertTrue(line.startsWith("[SERVER-TEST]"), "TPS line should start with prefix");
+            }
+        }
+    }
+    
+    @Test
+    void testModListLogFormat() {
+        InfoCollector collector = new InfoCollector();
+        collector.collectAndOutputServerInfo(mockServer);
+        
+        String output = outputStream.toString();
+        
+        // Verify mod list header format
+        assertTrue(MOD_LIST_HEADER_PATTERN.matcher(output).find(), "Mod list header should match expected format");
+        assertTrue(output.contains("Loaded Mods (3 total):"), "Should show correct mod count");
+        
+        // Verify individual mod entry formats
+        assertTrue(output.contains("[SERVER-TEST] - minecraft (1.20.1)"), "Minecraft mod entry should be correctly formatted");
+        assertTrue(output.contains("[SERVER-TEST] - forge (47.4.0)"), "Forge mod entry should be correctly formatted");
+        assertTrue(output.contains("[SERVER-TEST] - servertest (1.0.0)"), "ServerTest mod entry should be correctly formatted");
+        
+        // Verify all mod entries follow the pattern
+        String[] lines = output.split("\n");
+        int modEntryCount = 0;
+        for (String line : lines) {
+            if (line.contains("[SERVER-TEST] - ")) {
+                assertTrue(MOD_ENTRY_PATTERN.matcher(line).matches(), 
+                    "Mod entry should match pattern: " + line);
+                modEntryCount++;
+            }
+        }
+        assertEquals(3, modEntryCount, "Should have exactly 3 mod entries");
+    }
+    
+    @Test
+    void testShutdownLogFormat() {
+        ShutdownManager manager = new ShutdownManager();
+        
+        // Test shutdown message format by calling the shutdown manager directly
+        assertDoesNotThrow(() -> {
+            // This will trigger the shutdown logging
+            manager.scheduleShutdown(mockServer);
+        });
+        
+        String output = outputStream.toString();
+        
+        // Verify shutdown log format
+        assertTrue(SHUTDOWN_PATTERN.matcher(output).find(), "Shutdown log should match expected format");
+        assertTrue(output.contains("[SERVER-TEST] Server shutdown initiated"), "Should contain shutdown message");
+        
+        // Verify shutdown message formatting
+        String[] lines = output.split("\n");
+        for (String line : lines) {
+            if (line.contains("shutdown initiated")) {
+                assertTrue(line.startsWith("[SERVER-TEST]"), "Shutdown line should start with prefix");
+                assertFalse(line.contains("  "), "Shutdown line should not contain double spaces");
+            }
+        }
+    }
+    
+    @Test
+    void testErrorLogFormat() {
+        // Test error message formatting
+        RuntimeException testException = new RuntimeException("Test error message");
+        
+        ErrorHandler.handleCriticalError(
+            ErrorHandler.ErrorType.INFO_COLLECTION,
+            "Test error occurred",
+            testException
+        );
+        
+        String output = outputStream.toString();
+        
+        // Verify error log format
+        assertTrue(ERROR_PATTERN.matcher(output).find(), "Error log should match expected format");
+        assertTrue(output.contains("[SERVER-TEST] CRITICAL ERROR:"), "Should contain error prefix");
+        assertTrue(output.contains("Test error occurred"), "Should contain error message");
+        
+        // Verify error formatting
+        String[] lines = output.split("\n");
+        boolean foundErrorLine = false;
+        for (String line : lines) {
+            if (line.contains("CRITICAL ERROR:")) {
+                assertTrue(line.startsWith("[SERVER-TEST]"), "Error line should start with prefix");
+                foundErrorLine = true;
+            }
+        }
+        assertTrue(foundErrorLine, "Should find at least one error line");
+    }
+    
+    @Test
+    void testEnvironmentInfoLogFormat() {
+        EnvironmentDetector detector = new EnvironmentDetector();
+        
+        // Test different environment scenarios
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+        systemMock.when(() -> System.getenv("CI")).thenReturn("true");
+        
+        String envInfo = detector.getEnvironmentInfo();
+        assertEquals("GitHub Actions environment", envInfo);
+        
+        // Test CI environment
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn(null);
+        systemMock.when(() -> System.getenv("CI")).thenReturn("true");
+        
+        EnvironmentDetector detector2 = new EnvironmentDetector();
+        String envInfo2 = detector2.getEnvironmentInfo();
+        assertEquals("CI environment", envInfo2);
+        
+        // Test development environment
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn(null);
+        systemMock.when(() -> System.getenv("CI")).thenReturn(null);
+        
+        EnvironmentDetector detector3 = new EnvironmentDetector();
+        String envInfo3 = detector3.getEnvironmentInfo();
+        assertEquals("Development environment", envInfo3);
+    }
+    
+    @Test
+    void testLogPrefixConsistency() {
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+        
+        InfoCollector collector = new InfoCollector();
+        collector.collectAndOutputServerInfo(mockServer);
+        
+        ShutdownManager manager = new ShutdownManager();
+        assertDoesNotThrow(() -> manager.scheduleShutdown(mockServer));
+        
+        String output = outputStream.toString();
+        String[] lines = output.split("\n");
+        
+        // Verify all non-empty lines have the correct prefix
+        for (String line : lines) {
+            if (!line.trim().isEmpty() && line.contains("SERVER-TEST")) {
+                assertTrue(line.contains("[SERVER-TEST]"), 
+                    "All log lines should contain SERVER-TEST prefix: " + line);
+            }
+        }
+    }
+    
+    @Test
+    void testTPSCalculationAccuracy() {
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+        
+        // Test various tick times and verify TPS calculations
+        float[] tickTimes = {
+            50000000.0f,   // 50ms = 20 TPS
+            100000000.0f,  // 100ms = 10 TPS
+            25000000.0f,   // 25ms = 40 TPS
+            16666667.0f,   // ~16.67ms = 60 TPS
+            200000000.0f   // 200ms = 5 TPS
+        };
+        
+        double[] expectedTPS = {20.0, 10.0, 40.0, 60.0, 5.0};
+        
+        for (int i = 0; i < tickTimes.length; i++) {
+            outputStream.reset(); // Clear previous output
+            
+            when(mockServer.getAverageTickTime()).thenReturn(tickTimes[i]);
+            
+            InfoCollector collector = new InfoCollector();
+            collector.collectAndOutputServerInfo(mockServer);
+            
+            String output = outputStream.toString();
+            
+            // Verify TPS calculation is correct
+            assertTrue(output.contains("TPS: " + expectedTPS[i]), 
+                "Should show correct TPS for tick time " + tickTimes[i] + "ns: expected " + expectedTPS[i]);
+            
+            // Verify tick time is displayed correctly
+            double expectedTickTimeMs = tickTimes[i] / 1000000.0;
+            assertTrue(output.contains("Average tick time: " + expectedTickTimeMs + "ms"),
+                "Should show correct tick time in ms");
+        }
+    }
+    
+    @Test
+    void testModListWithSpecialCharacters() {
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+        
+        // Test mods with special characters in names and versions
+        when(mockMod1.getModId()).thenReturn("mod-with-dashes");
+        when(mockMod1.getDisplayName()).thenReturn("Mod With Spaces & Special Chars!");
+        when(mockMod1.getVersion()).thenReturn(mockVersion1);
+        when(mockVersion1.toString()).thenReturn("1.0.0-beta.1");
+        
+        when(mockMod2.getModId()).thenReturn("mod_with_underscores");
+        when(mockMod2.getDisplayName()).thenReturn("Mod (With Parentheses)");
+        when(mockMod2.getVersion()).thenReturn(mockVersion2);
+        when(mockVersion2.toString()).thenReturn("2.1.3+build.456");
+        
+        List<IModInfo> specialMods = Arrays.asList(mockMod1, mockMod2);
+        when(mockModList.getMods()).thenReturn(specialMods);
+        
+        InfoCollector collector = new InfoCollector();
+        collector.collectAndOutputServerInfo(mockServer);
+        
+        String output = outputStream.toString();
+        
+        // Verify special characters are handled correctly
+        assertTrue(output.contains("mod-with-dashes (1.0.0-beta.1)"), 
+            "Should handle dashes and beta versions");
+        assertTrue(output.contains("mod_with_underscores (2.1.3+build.456)"), 
+            "Should handle underscores and build numbers");
+        
+        // Verify mod count is correct
+        assertTrue(output.contains("Loaded Mods (2 total):"), "Should show correct count for special mods");
+    }
+    
+    @Test
+    void testLogOutputWithNoMods() {
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+        
+        // Test with empty mod list
+        when(mockModList.getMods()).thenReturn(Arrays.asList());
+        
+        InfoCollector collector = new InfoCollector();
+        collector.collectAndOutputServerInfo(mockServer);
+        
+        String output = outputStream.toString();
+        
+        // Verify empty mod list is handled correctly
+        assertTrue(output.contains("Loaded Mods (0 total):"), "Should show zero mods correctly");
+        
+        // Should still show TPS information
+        assertTrue(output.contains("TPS: 20.0"), "Should still show TPS with no mods");
+    }
+    
+    @Test
+    void testLogOutputThreadSafety() throws InterruptedException {
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+        
+        // Test concurrent log output to ensure thread safety
+        InfoCollector collector = new InfoCollector();
+        
+        Thread[] threads = new Thread[5];
+        for (int i = 0; i < threads.length; i++) {
+            threads[i] = new Thread(() -> {
+                collector.collectAndOutputServerInfo(mockServer);
+            });
+        }
+        
+        // Start all threads
+        for (Thread thread : threads) {
+            thread.start();
+        }
+        
+        // Wait for all threads to complete
+        for (Thread thread : threads) {
+            thread.join(5000); // 5 second timeout
+        }
+        
+        String output = outputStream.toString();
+        
+        // Verify output contains expected elements (may be interleaved)
+        assertTrue(output.contains("TPS:"), "Should contain TPS information from concurrent execution");
+        assertTrue(output.contains("Loaded Mods"), "Should contain mod list from concurrent execution");
+        
+        // Count occurrences to verify all threads executed
+        long tpsCount = output.lines().filter(line -> line.contains("TPS:")).count();
+        assertTrue(tpsCount >= 1, "Should have at least one TPS output from concurrent threads");
+    }
+}

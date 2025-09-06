@@ -1,0 +1,468 @@
+package com.servertest.mod;
+
+import com.servertest.mod.core.*;
+import net.minecraft.server.MinecraftServer;
+import net.minecraftforge.event.server.ServerStartedEvent;
+import net.minecraftforge.fml.ModList;
+import net.minecraftforge.forgespi.language.IModInfo;
+import org.apache.maven.artifact.versioning.ArtifactVersion;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.MockedStatic;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
+/**
+ * Comprehensive error scenario testing
+ * Tests all possible error conditions and their handling
+ */
+@ExtendWith(MockitoExtension.class)
+class ErrorScenarioComprehensiveTest {
+    
+    @Mock
+    private MinecraftServer mockServer;
+    
+    @Mock
+    private Thread mockServerThread;
+    
+    @Mock
+    private ModList mockModList;
+    
+    @Mock
+    private IModInfo mockModInfo;
+    
+    @Mock
+    private ArtifactVersion mockVersion;
+    
+    @Mock
+    private SystemExitHandler mockExitHandler;
+    
+    private ByteArrayOutputStream outputStream;
+    private PrintStream originalOut;
+    private PrintStream originalErr;
+    
+    private MockedStatic<System> systemMock;
+    private MockedStatic<ModList> modListMock;
+    
+    @BeforeEach
+    void setUp() {
+        // Capture console output
+        outputStream = new ByteArrayOutputStream();
+        originalOut = System.out;
+        originalErr = System.err;
+        System.setOut(new PrintStream(outputStream));
+        System.setErr(new PrintStream(outputStream));
+        
+        // Setup mocks
+        ErrorHandler.setExitHandler(mockExitHandler);
+        systemMock = mockStatic(System.class, CALLS_REAL_METHODS);
+        modListMock = mockStatic(ModList.class);
+        
+        // Setup CI environment by default
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+    }
+    
+    @AfterEach
+    void tearDown() {
+        System.setOut(originalOut);
+        System.setErr(originalErr);
+        ErrorHandler.resetExitHandler();
+        systemMock.close();
+        modListMock.close();
+    }
+    
+    @Test
+    void testServerNotRunningError() {
+        // Server reports as not running despite ServerStartedEvent
+        when(mockServer.isRunning()).thenReturn(false);
+        
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        monitor.onServerStarted(event);
+        
+        // Verify error handling
+        verify(mockExitHandler).exit(ErrorHandler.SERVER_STARTUP_ERROR);
+        assertFalse(monitor.isTestSequenceExecuted(), "Test sequence should not be marked as executed");
+        
+        String output = outputStream.toString();
+        assertTrue(output.contains("[SERVER-TEST] CRITICAL ERROR:"), "Should contain critical error message");
+        assertTrue(output.contains("Server not ready despite ServerStartedEvent"), "Should contain specific error message");
+    }
+    
+    @Test
+    void testServerThreadNotAliveError() {
+        when(mockServer.isRunning()).thenReturn(true);
+        when(mockServer.getRunningThread()).thenReturn(mockServerThread);
+        when(mockServerThread.isAlive()).thenReturn(false); // Thread not alive
+        
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        monitor.onServerStarted(event);
+        
+        verify(mockExitHandler).exit(ErrorHandler.SERVER_STARTUP_ERROR);
+        assertFalse(monitor.isTestSequenceExecuted());
+        
+        String output = outputStream.toString();
+        assertTrue(output.contains("CRITICAL ERROR"), "Should contain error message");
+    }
+    
+    @Test
+    void testTPSCalculationError() {
+        setupValidServer();
+        
+        // Make TPS calculation fail
+        when(mockServer.getAverageTickTime()).thenThrow(new RuntimeException("TPS calculation failed"));
+        
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        monitor.onServerStarted(event);
+        
+        verify(mockExitHandler).exit(ErrorHandler.INFO_COLLECTION_ERROR);
+        assertTrue(monitor.isTestSequenceExecuted(), "Test sequence should be marked as executed even with error");
+        
+        String output = outputStream.toString();
+        assertTrue(output.contains("CRITICAL ERROR"), "Should contain error message");
+        assertTrue(output.contains("Failed to collect server information"), "Should contain specific error context");
+    }
+    
+    @Test
+    void testModListAccessError() {
+        setupValidServer();
+        
+        // Make ModList access fail
+        modListMock.when(ModList::get).thenThrow(new RuntimeException("ModList access denied"));
+        
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        monitor.onServerStarted(event);
+        
+        verify(mockExitHandler).exit(ErrorHandler.INFO_COLLECTION_ERROR);
+        assertTrue(monitor.isTestSequenceExecuted());
+        
+        String output = outputStream.toString();
+        assertTrue(output.contains("CRITICAL ERROR"), "Should contain error message");
+    }
+    
+    @Test
+    void testModListGetModsError() {
+        setupValidServer();
+        
+        // ModList.get() succeeds but getMods() fails
+        modListMock.when(ModList::get).thenReturn(mockModList);
+        when(mockModList.getMods()).thenThrow(new RuntimeException("Mods list corrupted"));
+        
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        monitor.onServerStarted(event);
+        
+        verify(mockExitHandler).exit(ErrorHandler.INFO_COLLECTION_ERROR);
+        assertTrue(monitor.isTestSequenceExecuted());
+    }
+    
+    @Test
+    void testModInfoAccessError() {
+        setupValidServer();
+        
+        // ModList succeeds but individual mod info fails
+        modListMock.when(ModList::get).thenReturn(mockModList);
+        when(mockModList.getMods()).thenReturn(Arrays.asList(mockModInfo));
+        when(mockModInfo.getModId()).thenThrow(new RuntimeException("Mod ID access failed"));
+        
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        monitor.onServerStarted(event);
+        
+        verify(mockExitHandler).exit(ErrorHandler.INFO_COLLECTION_ERROR);
+        assertTrue(monitor.isTestSequenceExecuted());
+    }
+    
+    @Test
+    void testServerExecuteError() throws InterruptedException {
+        setupValidServerWithMods();
+        
+        // Make server.execute() fail
+        doThrow(new RuntimeException("Server execution failed")).when(mockServer).execute(any(Runnable.class));
+        
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        monitor.onServerStarted(event);
+        
+        verify(mockExitHandler).exit(ErrorHandler.SHUTDOWN_ERROR);
+        assertTrue(monitor.isTestSequenceExecuted());
+        
+        String output = outputStream.toString();
+        assertTrue(output.contains("CRITICAL ERROR"), "Should contain error message");
+    }
+    
+    @Test
+    void testServerHaltError() throws InterruptedException {
+        setupValidServerWithMods();
+        
+        CountDownLatch shutdownLatch = new CountDownLatch(1);
+        
+        // server.execute() succeeds but halt() fails
+        doAnswer(invocation -> {
+            Runnable shutdownTask = invocation.getArgument(0);
+            new Thread(() -> {
+                try {
+                    Thread.sleep(50);
+                    shutdownTask.run();
+                    shutdownLatch.countDown();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }).start();
+            return null;
+        }).when(mockServer).execute(any(Runnable.class));
+        
+        doThrow(new RuntimeException("Server halt failed")).when(mockServer).halt(false);
+        
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        monitor.onServerStarted(event);
+        
+        assertTrue(shutdownLatch.await(5, TimeUnit.SECONDS));
+        
+        verify(mockExitHandler).exit(ErrorHandler.SHUTDOWN_ERROR);
+        assertTrue(monitor.isTestSequenceExecuted());
+        
+        String output = outputStream.toString();
+        assertTrue(output.contains("CRITICAL ERROR"), "Should contain shutdown error");
+    }
+    
+    @Test
+    void testMultipleConsecutiveErrors() {
+        // Test that multiple errors are handled correctly
+        setupValidServer();
+        
+        // First error: TPS calculation fails
+        when(mockServer.getAverageTickTime()).thenThrow(new RuntimeException("First error"));
+        
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        monitor.onServerStarted(event);
+        
+        verify(mockExitHandler).exit(ErrorHandler.INFO_COLLECTION_ERROR);
+        assertTrue(monitor.isTestSequenceExecuted());
+        
+        // Reset and try again - should be ignored due to test sequence already executed
+        reset(mockExitHandler);
+        ErrorHandler.setExitHandler(mockExitHandler);
+        
+        monitor.onServerStarted(event);
+        
+        // Should not call exit again
+        verifyNoInteractions(mockExitHandler);
+    }
+    
+    @Test
+    void testErrorHandlerValidation() {
+        // Test null parameter validation
+        ErrorHandler.validateNotNull("valid", "testParam", ErrorHandler.ErrorType.GENERAL);
+        verifyNoInteractions(mockExitHandler);
+        
+        // Test null validation failure
+        ErrorHandler.validateNotNull(null, "nullParam", ErrorHandler.ErrorType.ENVIRONMENT);
+        verify(mockExitHandler).exit(ErrorHandler.ENVIRONMENT_ERROR);
+        
+        String output = outputStream.toString();
+        assertTrue(output.contains("CRITICAL ERROR"), "Should contain validation error");
+        assertTrue(output.contains("nullParam cannot be null"), "Should contain parameter name");
+    }
+    
+    @Test
+    void testErrorHandlerOperationExecution() {
+        // Test successful operation
+        boolean result = ErrorHandler.executeWithErrorHandling(
+            () -> { /* success */ },
+            ErrorHandler.ErrorType.GENERAL,
+            "Test operation"
+        );
+        assertTrue(result, "Successful operation should return true");
+        verifyNoInteractions(mockExitHandler);
+        
+        // Test failing operation (non-critical)
+        boolean failResult = ErrorHandler.executeWithErrorHandling(
+            () -> { throw new RuntimeException("Test failure"); },
+            ErrorHandler.ErrorType.INFO_COLLECTION,
+            "Test operation"
+        );
+        assertFalse(failResult, "Failed operation should return false");
+        verifyNoInteractions(mockExitHandler); // Non-critical should not exit
+        
+        // Test critical operation failure
+        ErrorHandler.executeCriticalOperation(
+            () -> { throw new RuntimeException("Critical failure"); },
+            ErrorHandler.ErrorType.SHUTDOWN,
+            "Critical operation"
+        );
+        verify(mockExitHandler).exit(ErrorHandler.SHUTDOWN_ERROR);
+    }
+    
+    @Test
+    void testErrorMessageFormatting() {
+        RuntimeException testException = new RuntimeException("Test exception message");
+        
+        // Test critical error formatting
+        ErrorHandler.handleCriticalError(
+            ErrorHandler.ErrorType.SERVER_STARTUP,
+            "Custom error message",
+            testException
+        );
+        
+        String output = outputStream.toString();
+        assertTrue(output.contains("[SERVER-TEST] CRITICAL ERROR:"), "Should contain error prefix");
+        assertTrue(output.contains("Custom error message"), "Should contain custom message");
+        assertTrue(output.contains("Test exception message"), "Should contain exception message");
+        
+        verify(mockExitHandler).exit(ErrorHandler.SERVER_STARTUP_ERROR);
+    }
+    
+    @Test
+    void testNonCriticalErrorHandling() {
+        RuntimeException testException = new RuntimeException("Non-critical error");
+        
+        // Test non-critical error handling
+        ErrorHandler.handleNonCriticalError(
+            ErrorHandler.ErrorType.INFO_COLLECTION,
+            "Non-critical error occurred",
+            testException
+        );
+        
+        String output = outputStream.toString();
+        assertTrue(output.contains("[SERVER-TEST] ERROR:"), "Should contain non-critical error prefix");
+        assertTrue(output.contains("Non-critical error occurred"), "Should contain error message");
+        
+        // Should not exit for non-critical errors
+        verifyNoInteractions(mockExitHandler);
+    }
+    
+    @Test
+    void testErrorTypeExitCodes() {
+        // Verify all error types have correct exit codes
+        assertEquals(0, ErrorHandler.SUCCESS);
+        assertEquals(1, ErrorHandler.GENERAL_ERROR);
+        assertEquals(2, ErrorHandler.ENVIRONMENT_ERROR);
+        assertEquals(3, ErrorHandler.SERVER_STARTUP_ERROR);
+        assertEquals(4, ErrorHandler.INFO_COLLECTION_ERROR);
+        assertEquals(5, ErrorHandler.SHUTDOWN_ERROR);
+        
+        // Test each error type
+        ErrorHandler.ErrorType[] errorTypes = {
+            ErrorHandler.ErrorType.GENERAL,
+            ErrorHandler.ErrorType.ENVIRONMENT,
+            ErrorHandler.ErrorType.SERVER_STARTUP,
+            ErrorHandler.ErrorType.INFO_COLLECTION,
+            ErrorHandler.ErrorType.SHUTDOWN
+        };
+        
+        int[] expectedCodes = {1, 2, 3, 4, 5};
+        
+        for (int i = 0; i < errorTypes.length; i++) {
+            assertEquals(expectedCodes[i], errorTypes[i].getExitCode(), 
+                "Error type " + errorTypes[i] + " should have exit code " + expectedCodes[i]);
+        }
+    }
+    
+    @Test
+    void testConcurrentErrorHandling() throws InterruptedException {
+        setupValidServer();
+        
+        // Test concurrent error scenarios
+        when(mockServer.getAverageTickTime()).thenThrow(new RuntimeException("Concurrent error"));
+        
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        
+        // Execute multiple concurrent error scenarios
+        Thread[] threads = new Thread[3];
+        for (int i = 0; i < threads.length; i++) {
+            threads[i] = new Thread(() -> {
+                monitor.onServerStarted(event);
+            });
+        }
+        
+        for (Thread thread : threads) {
+            thread.start();
+        }
+        
+        for (Thread thread : threads) {
+            thread.join(5000);
+        }
+        
+        // Should only exit once despite multiple concurrent errors
+        verify(mockExitHandler, times(1)).exit(ErrorHandler.INFO_COLLECTION_ERROR);
+        assertTrue(monitor.isTestSequenceExecuted());
+    }
+    
+    private void setupValidServer() {
+        when(mockServer.isRunning()).thenReturn(true);
+        when(mockServer.getRunningThread()).thenReturn(mockServerThread);
+        when(mockServerThread.isAlive()).thenReturn(true);
+        when(mockServer.getAverageTickTime()).thenReturn(50000000.0f);
+    }
+    
+    private void setupValidServerWithMods() {
+        setupValidServer();
+        
+        when(mockModInfo.getModId()).thenReturn("testmod");
+        when(mockModInfo.getDisplayName()).thenReturn("Test Mod");
+        when(mockModInfo.getVersion()).thenReturn(mockVersion);
+        when(mockVersion.toString()).thenReturn("1.0.0");
+        
+        modListMock.when(ModList::get).thenReturn(mockModList);
+        when(mockModList.getMods()).thenReturn(Arrays.asList(mockModInfo));
+    }
+}

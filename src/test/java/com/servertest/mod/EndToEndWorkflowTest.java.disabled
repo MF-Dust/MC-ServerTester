@@ -1,0 +1,253 @@
+package com.servertest.mod;
+
+import com.servertest.mod.core.*;
+import com.servertest.mod.model.ModInfo;
+import com.servertest.mod.model.TestResult;
+import net.minecraft.server.MinecraftServer;
+import net.minecraftforge.event.server.ServerStartedEvent;
+import net.minecraftforge.fml.ModList;
+import net.minecraftforge.forgespi.language.IModInfo;
+import org.apache.maven.artifact.versioning.ArtifactVersion;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.MockedStatic;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.util.Arrays;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+/**
+ * End-to-end integration test for the complete server test workflow
+ * Simulates a real CI environment scenario
+ */
+@ExtendWith(MockitoExtension.class)
+class EndToEndWorkflowTest {
+    
+    @Mock
+    private MinecraftServer mockServer;
+    
+    @Mock
+    private Thread mockServerThread;
+    
+    @Mock
+    private ModList mockModList;
+    
+    @Mock
+    private IModInfo mockModInfo1;
+    
+    @Mock
+    private IModInfo mockModInfo2;
+    
+    @Mock
+    private ArtifactVersion mockVersion1;
+    
+    @Mock
+    private ArtifactVersion mockVersion2;
+    
+    private ServerMonitor serverMonitor;
+    private EnvironmentDetector environmentDetector;
+    private InfoCollector infoCollector;
+    private ShutdownManager shutdownManager;
+    
+    @BeforeEach
+    void setUp() {
+        // Setup mock server
+        when(mockServer.isRunning()).thenReturn(true);
+        when(mockServer.getRunningThread()).thenReturn(mockServerThread);
+        when(mockServerThread.isAlive()).thenReturn(true);
+        when(mockServer.getAverageTickTime()).thenReturn(50000000.0f); // 50ms = 20 TPS
+        
+        // Setup mock mod list
+        when(mockModInfo1.getModId()).thenReturn("minecraft");
+        when(mockModInfo1.getDisplayName()).thenReturn("Minecraft");
+        when(mockModInfo1.getVersion()).thenReturn(mockVersion1);
+        when(mockVersion1.toString()).thenReturn("1.20.1");
+        
+        when(mockModInfo2.getModId()).thenReturn("servertest");
+        when(mockModInfo2.getDisplayName()).thenReturn("Server Test Mod");
+        when(mockModInfo2.getVersion()).thenReturn(mockVersion2);
+        when(mockVersion2.toString()).thenReturn("1.0.0");
+        
+        when(mockModList.getMods()).thenReturn(Arrays.asList(mockModInfo1, mockModInfo2));
+        
+        // Initialize components
+        environmentDetector = new EnvironmentDetector();
+        infoCollector = new InfoCollector();
+        shutdownManager = new ShutdownManager();
+        serverMonitor = new ServerMonitor(environmentDetector, infoCollector, shutdownManager);
+    }
+    
+    @Test
+    void testCompleteWorkflowSimulation() {
+        // Simulate CI environment
+        try (MockedStatic<System> systemMock = mockStatic(System.class, CALLS_REAL_METHODS)) {
+            // Mock environment variables for CI detection
+            systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+            
+            // Mock ModList for info collection
+            try (MockedStatic<ModList> modListMock = mockStatic(ModList.class)) {
+                modListMock.when(ModList::get).thenReturn(mockModList);
+                
+                // Mock System.exit to prevent actual exit
+                systemMock.when(() -> System.exit(anyInt())).then(invocation -> {
+                    int exitCode = invocation.getArgument(0);
+                    throw new RuntimeException("System.exit(" + exitCode + ")");
+                });
+                
+                // Execute the workflow
+                ServerStartedEvent event = new ServerStartedEvent(mockServer);
+                
+                // This should complete the full workflow and attempt to exit
+                RuntimeException exitException = assertThrows(RuntimeException.class, () -> {
+                    serverMonitor.onServerStarted(event);
+                });
+                
+                // Verify it attempted to exit with success code
+                assertTrue(exitException.getMessage().contains("System.exit(0)"));
+                
+                // Verify the test sequence was executed
+                assertTrue(serverMonitor.isTestSequenceExecuted());
+            }
+        }
+    }
+    
+    @Test
+    void testWorkflowWithServerExecuteDelay() {
+        // Test that shutdown is properly scheduled on server thread
+        try (MockedStatic<System> systemMock = mockStatic(System.class, CALLS_REAL_METHODS)) {
+            systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+            
+            try (MockedStatic<ModList> modListMock = mockStatic(ModList.class)) {
+                modListMock.when(ModList::get).thenReturn(mockModList);
+                
+                // Mock server.execute to capture the shutdown runnable
+                doAnswer(invocation -> {
+                    Runnable shutdownTask = invocation.getArgument(0);
+                    // Execute the shutdown task immediately for testing
+                    shutdownTask.run();
+                    return null;
+                }).when(mockServer).execute(any(Runnable.class));
+                
+                // Mock System.exit
+                systemMock.when(() -> System.exit(anyInt())).then(invocation -> {
+                    int exitCode = invocation.getArgument(0);
+                    throw new RuntimeException("System.exit(" + exitCode + ")");
+                });
+                
+                ServerStartedEvent event = new ServerStartedEvent(mockServer);
+                
+                RuntimeException exitException = assertThrows(RuntimeException.class, () -> {
+                    serverMonitor.onServerStarted(event);
+                });
+                
+                assertTrue(exitException.getMessage().contains("System.exit(0)"));
+                verify(mockServer).execute(any(Runnable.class));
+                verify(mockServer).halt(false);
+            }
+        }
+    }
+    
+    @Test
+    void testWorkflowWithInfoCollectionError() {
+        try (MockedStatic<System> systemMock = mockStatic(System.class, CALLS_REAL_METHODS)) {
+            systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+            
+            // Mock ModList to throw exception
+            try (MockedStatic<ModList> modListMock = mockStatic(ModList.class)) {
+                modListMock.when(ModList::get).thenThrow(new RuntimeException("Mod list access failed"));
+                
+                // Mock ErrorHandler to capture critical errors
+                try (MockedStatic<ErrorHandler> errorHandlerMock = mockStatic(ErrorHandler.class)) {
+                    errorHandlerMock.when(() -> ErrorHandler.handleCriticalError(
+                        any(ErrorHandler.ErrorType.class), anyString(), any()))
+                        .thenThrow(new RuntimeException("Critical error handled"));
+                    
+                    ServerStartedEvent event = new ServerStartedEvent(mockServer);
+                    
+                    assertThrows(RuntimeException.class, () -> {
+                        serverMonitor.onServerStarted(event);
+                    });
+                    
+                    // Verify error handling was called
+                    errorHandlerMock.verify(() -> ErrorHandler.handleCriticalError(
+                        eq(ErrorHandler.ErrorType.INFO_COLLECTION),
+                        contains("Failed to collect server information"),
+                        any(RuntimeException.class)
+                    ));
+                }
+            }
+        }
+    }
+    
+    @Test
+    void testNonCIEnvironmentBehavior() {
+        // Test behavior when not in CI environment
+        try (MockedStatic<System> systemMock = mockStatic(System.class, CALLS_REAL_METHODS)) {
+            // No CI environment variables set
+            systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn(null);
+            systemMock.when(() -> System.getenv("CI")).thenReturn(null);
+            systemMock.when(() -> System.getProperty("java.awt.headless")).thenReturn(null);
+            
+            // Create new environment detector to test non-CI behavior
+            EnvironmentDetector nonCIDetector = new EnvironmentDetector();
+            assertFalse(nonCIDetector.isInCIEnvironment());
+            assertEquals("Development environment", nonCIDetector.getEnvironmentInfo());
+        }
+    }
+    
+    @Test
+    void testServerReadinessValidation() {
+        try (MockedStatic<System> systemMock = mockStatic(System.class, CALLS_REAL_METHODS)) {
+            systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+            
+            // Test with server not running
+            when(mockServer.isRunning()).thenReturn(false);
+            
+            try (MockedStatic<ErrorHandler> errorHandlerMock = mockStatic(ErrorHandler.class)) {
+                errorHandlerMock.when(() -> ErrorHandler.handleCriticalError(
+                    any(ErrorHandler.ErrorType.class), anyString(), any()))
+                    .thenThrow(new RuntimeException("Server not ready"));
+                
+                ServerStartedEvent event = new ServerStartedEvent(mockServer);
+                
+                assertThrows(RuntimeException.class, () -> {
+                    serverMonitor.onServerStarted(event);
+                });
+                
+                errorHandlerMock.verify(() -> ErrorHandler.handleCriticalError(
+                    eq(ErrorHandler.ErrorType.SERVER_STARTUP),
+                    eq("Server not ready despite ServerStartedEvent"),
+                    isNull()
+                ));
+            }
+        }
+    }
+    
+    @Test
+    void testTPSCalculationAccuracy() {
+        try (MockedStatic<System> systemMock = mockStatic(System.class, CALLS_REAL_METHODS)) {
+            systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+            
+            try (MockedStatic<ModList> modListMock = mockStatic(ModList.class)) {
+                modListMock.when(ModList::get).thenReturn(mockModList);
+                
+                // Test different tick times
+                when(mockServer.getAverageTickTime()).thenReturn(50000000.0f); // 50ms = 20 TPS
+                
+                InfoCollector collector = new InfoCollector();
+                
+                // We can't directly test the private methods, but we can verify
+                // the component integration works by checking it doesn't throw
+                assertDoesNotThrow(() -> {
+                    // This would normally output to logger, but we're just testing it runs
+                    collector.collectAndOutputServerInfo(mockServer);
+                });
+            }
+        }
+    }
+}

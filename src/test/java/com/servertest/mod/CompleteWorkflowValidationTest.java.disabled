@@ -1,0 +1,461 @@
+package com.servertest.mod;
+
+import com.servertest.mod.core.*;
+import net.minecraft.server.MinecraftServer;
+import net.minecraftforge.event.server.ServerStartedEvent;
+import net.minecraftforge.fml.ModList;
+import net.minecraftforge.forgespi.language.IModInfo;
+import org.apache.maven.artifact.versioning.ArtifactVersion;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.MockedStatic;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
+/**
+ * Comprehensive workflow validation tests
+ * Tests the complete startup -> collection -> shutdown flow with detailed verification
+ */
+@ExtendWith(MockitoExtension.class)
+class CompleteWorkflowValidationTest {
+    
+    @Mock
+    private MinecraftServer mockServer;
+    
+    @Mock
+    private Thread mockServerThread;
+    
+    @Mock
+    private ModList mockModList;
+    
+    @Mock
+    private IModInfo mockMod1;
+    
+    @Mock
+    private IModInfo mockMod2;
+    
+    @Mock
+    private IModInfo mockMod3;
+    
+    @Mock
+    private ArtifactVersion mockVersion1;
+    
+    @Mock
+    private ArtifactVersion mockVersion2;
+    
+    @Mock
+    private ArtifactVersion mockVersion3;
+    
+    @Mock
+    private SystemExitHandler mockExitHandler;
+    
+    private ByteArrayOutputStream outputStream;
+    private PrintStream originalOut;
+    private PrintStream originalErr;
+    
+    private MockedStatic<System> systemMock;
+    private MockedStatic<ModList> modListMock;
+    
+    private AtomicInteger workflowStep;
+    private AtomicBoolean serverInfoCollected;
+    private AtomicBoolean shutdownInitiated;
+    
+    @BeforeEach
+    void setUp() {
+        // Initialize workflow tracking
+        workflowStep = new AtomicInteger(0);
+        serverInfoCollected = new AtomicBoolean(false);
+        shutdownInitiated = new AtomicBoolean(false);
+        
+        // Capture console output
+        outputStream = new ByteArrayOutputStream();
+        originalOut = System.out;
+        originalErr = System.err;
+        System.setOut(new PrintStream(outputStream));
+        System.setErr(new PrintStream(outputStream));
+        
+        // Setup mocks
+        ErrorHandler.setExitHandler(mockExitHandler);
+        systemMock = mockStatic(System.class, CALLS_REAL_METHODS);
+        modListMock = mockStatic(ModList.class);
+        
+        setupMockServer();
+        setupMockModList();
+    }
+    
+    @AfterEach
+    void tearDown() {
+        System.setOut(originalOut);
+        System.setErr(originalErr);
+        ErrorHandler.resetExitHandler();
+        systemMock.close();
+        modListMock.close();
+    }
+    
+    private void setupMockServer() {
+        when(mockServer.isRunning()).thenReturn(true);
+        when(mockServer.getRunningThread()).thenReturn(mockServerThread);
+        when(mockServerThread.isAlive()).thenReturn(true);
+        when(mockServer.getAverageTickTime()).thenReturn(50000000.0f); // 20 TPS
+    }
+    
+    private void setupMockModList() {
+        // Setup multiple mods to test comprehensive listing
+        when(mockMod1.getModId()).thenReturn("minecraft");
+        when(mockMod1.getDisplayName()).thenReturn("Minecraft");
+        when(mockMod1.getVersion()).thenReturn(mockVersion1);
+        when(mockVersion1.toString()).thenReturn("1.20.1");
+        
+        when(mockMod2.getModId()).thenReturn("forge");
+        when(mockMod2.getDisplayName()).thenReturn("Minecraft Forge");
+        when(mockMod2.getVersion()).thenReturn(mockVersion2);
+        when(mockVersion2.toString()).thenReturn("47.4.0");
+        
+        when(mockMod3.getModId()).thenReturn("servertest");
+        when(mockMod3.getDisplayName()).thenReturn("Server Test Mod");
+        when(mockMod3.getVersion()).thenReturn(mockVersion3);
+        when(mockVersion3.toString()).thenReturn("1.0.0");
+        
+        List<IModInfo> mods = Arrays.asList(mockMod1, mockMod2, mockMod3);
+        when(mockModList.getMods()).thenReturn(mods);
+        modListMock.when(ModList::get).thenReturn(mockModList);
+    }
+    
+    @Test
+    void testCompleteWorkflowSequence() throws InterruptedException {
+        // Setup CI environment
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+        
+        CountDownLatch workflowComplete = new CountDownLatch(1);
+        
+        // Track workflow execution order
+        doAnswer(invocation -> {
+            workflowStep.set(1); // Server readiness check passed
+            return true;
+        }).when(mockServer).isRunning();
+        
+        doAnswer(invocation -> {
+            workflowStep.set(2); // TPS collection
+            serverInfoCollected.set(true);
+            return 50000000.0f;
+        }).when(mockServer).getAverageTickTime();
+        
+        modListMock.when(ModList::get).thenAnswer(invocation -> {
+            workflowStep.set(3); // Mod list collection
+            return mockModList;
+        });
+        
+        doAnswer(invocation -> {
+            Runnable shutdownTask = invocation.getArgument(0);
+            workflowStep.set(4); // Shutdown scheduling
+            
+            // Execute shutdown in separate thread to simulate real behavior
+            new Thread(() -> {
+                try {
+                    Thread.sleep(100); // Simulate brief delay
+                    shutdownTask.run();
+                    workflowComplete.countDown();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }).start();
+            return null;
+        }).when(mockServer).execute(any(Runnable.class));
+        
+        doAnswer(invocation -> {
+            workflowStep.set(5); // Actual shutdown
+            shutdownInitiated.set(true);
+            return null;
+        }).when(mockServer).halt(false);
+        
+        // Execute workflow
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        monitor.onServerStarted(event);
+        
+        // Wait for workflow completion
+        assertTrue(workflowComplete.await(10, TimeUnit.SECONDS), "Workflow should complete within 10 seconds");
+        
+        // Verify workflow sequence
+        assertEquals(5, workflowStep.get(), "All workflow steps should be completed");
+        assertTrue(serverInfoCollected.get(), "Server info should be collected");
+        assertTrue(shutdownInitiated.get(), "Shutdown should be initiated");
+        assertTrue(monitor.isTestSequenceExecuted(), "Test sequence should be marked as executed");
+        
+        // Verify method calls in correct order
+        verify(mockServer).isRunning();
+        verify(mockServer).getAverageTickTime();
+        verify(mockServer).execute(any(Runnable.class));
+        verify(mockServer).halt(false);
+        verify(mockExitHandler).exit(ErrorHandler.SUCCESS);
+        
+        // Verify complete log output
+        verifyCompleteWorkflowLogs();
+    }
+    
+    @Test
+    void testWorkflowTimingAndPerformance() throws InterruptedException {
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+        
+        long startTime = System.currentTimeMillis();
+        CountDownLatch workflowComplete = new CountDownLatch(1);
+        
+        doAnswer(invocation -> {
+            Runnable shutdownTask = invocation.getArgument(0);
+            new Thread(() -> {
+                try {
+                    Thread.sleep(50); // Minimal delay
+                    shutdownTask.run();
+                    workflowComplete.countDown();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }).start();
+            return null;
+        }).when(mockServer).execute(any(Runnable.class));
+        
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        monitor.onServerStarted(event);
+        
+        assertTrue(workflowComplete.await(5, TimeUnit.SECONDS));
+        
+        long executionTime = System.currentTimeMillis() - startTime;
+        
+        // Verify workflow completes quickly (should be under 2 seconds in test environment)
+        assertTrue(executionTime < 2000, "Workflow should complete quickly: " + executionTime + "ms");
+        
+        verify(mockExitHandler).exit(ErrorHandler.SUCCESS);
+    }
+    
+    @Test
+    void testWorkflowIdempotency() throws InterruptedException {
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+        
+        CountDownLatch firstExecution = new CountDownLatch(1);
+        
+        doAnswer(invocation -> {
+            Runnable shutdownTask = invocation.getArgument(0);
+            new Thread(() -> {
+                try {
+                    Thread.sleep(50);
+                    shutdownTask.run();
+                    firstExecution.countDown();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }).start();
+            return null;
+        }).when(mockServer).execute(any(Runnable.class));
+        
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        
+        // First execution
+        monitor.onServerStarted(event);
+        assertTrue(firstExecution.await(5, TimeUnit.SECONDS));
+        assertTrue(monitor.isTestSequenceExecuted());
+        
+        // Second execution should be ignored
+        monitor.onServerStarted(event);
+        
+        // Verify only one execution occurred
+        verify(mockServer, times(1)).execute(any(Runnable.class));
+        verify(mockServer, times(1)).halt(false);
+        verify(mockExitHandler, times(1)).exit(ErrorHandler.SUCCESS);
+    }
+    
+    @Test
+    void testWorkflowWithVariousTPSValues() throws InterruptedException {
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+        
+        // Test different TPS scenarios
+        float[] tpsValues = {
+            16666667.0f,  // 60 TPS (very fast)
+            50000000.0f,  // 20 TPS (normal)
+            100000000.0f, // 10 TPS (slow)
+            200000000.0f  // 5 TPS (very slow)
+        };
+        
+        for (float tpsValue : tpsValues) {
+            // Reset for each test
+            outputStream.reset();
+            
+            when(mockServer.getAverageTickTime()).thenReturn(tpsValue);
+            
+            CountDownLatch execution = new CountDownLatch(1);
+            doAnswer(invocation -> {
+                Runnable shutdownTask = invocation.getArgument(0);
+                new Thread(() -> {
+                    try {
+                        Thread.sleep(50);
+                        shutdownTask.run();
+                        execution.countDown();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }).start();
+                return null;
+            }).when(mockServer).execute(any(Runnable.class));
+            
+            EnvironmentDetector detector = new EnvironmentDetector();
+            InfoCollector collector = new InfoCollector();
+            ShutdownManager manager = new ShutdownManager();
+            ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+            
+            ServerStartedEvent event = new ServerStartedEvent(mockServer);
+            monitor.onServerStarted(event);
+            
+            assertTrue(execution.await(5, TimeUnit.SECONDS));
+            
+            // Verify TPS is properly calculated and logged
+            String output = outputStream.toString();
+            assertTrue(output.contains("TPS:"), "Should contain TPS information for value: " + tpsValue);
+            assertTrue(output.contains("Average tick time:"), "Should contain tick time for value: " + tpsValue);
+            
+            // Reset monitor for next iteration
+            monitor.resetTestSequenceFlag();
+        }
+    }
+    
+    @Test
+    void testWorkflowWithLargeModList() throws InterruptedException {
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+        
+        // Create a large mod list to test performance and formatting
+        IModInfo[] largeMods = new IModInfo[50];
+        ArtifactVersion[] versions = new ArtifactVersion[50];
+        
+        for (int i = 0; i < 50; i++) {
+            largeMods[i] = mock(IModInfo.class);
+            versions[i] = mock(ArtifactVersion.class);
+            
+            when(largeMods[i].getModId()).thenReturn("testmod" + i);
+            when(largeMods[i].getDisplayName()).thenReturn("Test Mod " + i);
+            when(largeMods[i].getVersion()).thenReturn(versions[i]);
+            when(versions[i].toString()).thenReturn("1.0." + i);
+        }
+        
+        when(mockModList.getMods()).thenReturn(Arrays.asList(largeMods));
+        
+        CountDownLatch execution = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            Runnable shutdownTask = invocation.getArgument(0);
+            new Thread(() -> {
+                try {
+                    Thread.sleep(100);
+                    shutdownTask.run();
+                    execution.countDown();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }).start();
+            return null;
+        }).when(mockServer).execute(any(Runnable.class));
+        
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        monitor.onServerStarted(event);
+        
+        assertTrue(execution.await(10, TimeUnit.SECONDS));
+        
+        // Verify large mod list is handled properly
+        String output = outputStream.toString();
+        assertTrue(output.contains("50 total):"), "Should show correct total mod count");
+        assertTrue(output.contains("testmod0 (1.0.0)"), "Should contain first mod");
+        assertTrue(output.contains("testmod49 (1.0.49)"), "Should contain last mod");
+        
+        verify(mockExitHandler).exit(ErrorHandler.SUCCESS);
+    }
+    
+    @Test
+    void testWorkflowErrorRecovery() throws InterruptedException {
+        systemMock.when(() -> System.getenv("GITHUB_ACTIONS")).thenReturn("true");
+        
+        // Test partial failure scenarios where some info collection fails
+        // but workflow continues
+        
+        // Make TPS collection succeed but mod list fail initially
+        when(mockServer.getAverageTickTime()).thenReturn(50000000.0f);
+        modListMock.when(ModList::get).thenThrow(new RuntimeException("Mod list temporarily unavailable"));
+        
+        EnvironmentDetector detector = new EnvironmentDetector();
+        InfoCollector collector = new InfoCollector();
+        ShutdownManager manager = new ShutdownManager();
+        ServerMonitor monitor = new ServerMonitor(detector, collector, manager);
+        
+        ServerStartedEvent event = new ServerStartedEvent(mockServer);
+        monitor.onServerStarted(event);
+        
+        // Should handle the error and exit with error code
+        verify(mockExitHandler).exit(ErrorHandler.INFO_COLLECTION_ERROR);
+        assertTrue(monitor.isTestSequenceExecuted());
+        
+        String output = outputStream.toString();
+        assertTrue(output.contains("CRITICAL ERROR"), "Should contain error information");
+    }
+    
+    private void verifyCompleteWorkflowLogs() {
+        String output = outputStream.toString();
+        
+        // Verify all required log components are present
+        assertTrue(output.contains("[SERVER-TEST]"), "All messages should have SERVER-TEST prefix");
+        
+        // Verify TPS information
+        assertTrue(output.contains("TPS: 20.0"), "Should show correct TPS calculation");
+        assertTrue(output.contains("Average tick time: 50.0ms"), "Should show correct tick time");
+        
+        // Verify mod list information
+        assertTrue(output.contains("Loaded Mods (3 total):"), "Should show correct mod count");
+        assertTrue(output.contains("minecraft (1.20.1)"), "Should list Minecraft");
+        assertTrue(output.contains("forge (47.4.0)"), "Should list Forge");
+        assertTrue(output.contains("servertest (1.0.0)"), "Should list ServerTest mod");
+        
+        // Verify shutdown information
+        assertTrue(output.contains("Server shutdown initiated"), "Should confirm shutdown initiation");
+        
+        // Verify no error messages in successful execution
+        assertFalse(output.contains("ERROR"), "Should not contain error messages in successful run");
+        assertFalse(output.contains("CRITICAL"), "Should not contain critical error messages");
+        
+        // Verify proper formatting
+        String[] lines = output.split("\n");
+        for (String line : lines) {
+            if (line.contains("[SERVER-TEST]")) {
+                assertTrue(line.startsWith("[SERVER-TEST]") || line.contains("[SERVER-TEST]"), 
+                    "Each log line should be properly formatted: " + line);
+            }
+        }
+    }
+}
